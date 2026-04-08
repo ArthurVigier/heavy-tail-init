@@ -1,0 +1,33 @@
+# Data
+data/
+*.tar.gz
+
+# Results (tracked separately or via wandb)
+results/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Env
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Checkpoints
+*.pt
+*.pth
+checkpoints/
