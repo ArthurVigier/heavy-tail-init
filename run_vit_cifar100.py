@@ -87,32 +87,37 @@ class CachedCIFAR100(Dataset):
         self.dataset = datasets.CIFAR100(root=root, train=train, download=download)
         self.targets = self.dataset.targets
         self.train = train
+        self.img_size = img_size
 
-        # Pré-resize + to_tensor + normalize (une seule fois)
-        resize_and_normalize = transforms.Compose([
+        # Pré-resize seulement, stocké en uint8 (1 byte/pixel vs 4)
+        resize = transforms.Compose([
             transforms.Resize(img_size),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.5071, 0.4867, 0.4408],
-                std=[0.2675, 0.2565, 0.2761],
-            ),
+            transforms.ToTensor(),  # [0,1] float32 temporaire
         ])
 
         split = "train" if train else "test"
         n = len(self.dataset)
-        print(f"  ⏳ Caching {n} {split} images at {img_size}×{img_size}...", end=" ", flush=True)
+        print(f"  ⏳ Caching {n} {split} images at {img_size}×{img_size} (uint8)...", end=" ", flush=True)
         t0 = time.time()
 
-        # Pre-allocate et remplir
-        sample = resize_and_normalize(self.dataset[0][0])
-        self.images = torch.empty(n, *sample.shape, dtype=torch.float32)
+        # Stocker en uint8 : 7.5 GB train au lieu de 30 GB
+        self.images = torch.empty(n, 3, img_size, img_size, dtype=torch.uint8)
         for i in range(n):
             img, _ = self.dataset[i]
-            self.images[i] = resize_and_normalize(img)
+            self.images[i] = (resize(img) * 255).to(torch.uint8)
+
+        # Libérer le dataset original
+        del self.dataset
 
         elapsed = time.time() - t0
         mem_gb = self.images.nelement() * self.images.element_size() / 1e9
         print(f"done in {elapsed:.0f}s ({mem_gb:.1f} GB)")
+
+        # Normalisation appliquée dynamiquement (rapide sur tenseur)
+        self.normalize = transforms.Normalize(
+            mean=[0.5071, 0.4867, 0.4408],
+            std=[0.2675, 0.2565, 0.2761],
+        )
 
         # Augmentations dynamiques (appliquées à chaque __getitem__)
         if train:
@@ -128,7 +133,8 @@ class CachedCIFAR100(Dataset):
         return len(self.images)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
-        img = self.images[idx]
+        img = self.images[idx].float() / 255.0  # uint8 → float32 [0,1]
+        img = self.normalize(img)
         if self.augment is not None:
             img = self.augment(img)
         return img, self.targets[idx]
