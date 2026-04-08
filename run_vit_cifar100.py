@@ -27,7 +27,7 @@ import os
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torchvision import datasets, transforms
 import timm
 
@@ -67,10 +67,61 @@ DEFAULT_CONFIG = {
 # --- Data ---------------------------------------------------------------------
 
 
+class CachedCIFAR100(Dataset):
+    """
+    CIFAR-100 avec images PIL pré-resizées cachées en RAM.
+
+    On cache le Resize(32→224) une seule fois au démarrage (~7.5 GB en PIL).
+    Les augmentations (TrivialAugmentWide, RandomCrop, etc.) restent
+    dynamiques car elles opèrent sur les PIL images cachées.
+    """
+
+    def __init__(
+        self,
+        root: str,
+        train: bool,
+        img_size: int,
+        transform: transforms.Compose,
+        download: bool = True,
+    ) -> None:
+        self.dataset = datasets.CIFAR100(root=root, train=train, download=download)
+        self.targets = self.dataset.targets
+        self.transform = transform
+
+        resize = transforms.Resize(img_size)
+
+        split = "train" if train else "test"
+        n = len(self.dataset)
+        print(f"  ⏳ Caching {n} {split} PIL images at {img_size}×{img_size}...", end=" ", flush=True)
+        t0 = time.time()
+
+        self.images = [resize(self.dataset[i][0]) for i in range(n)]
+
+        # Libérer le dataset original
+        del self.dataset
+
+        elapsed = time.time() - t0
+        print(f"done in {elapsed:.0f}s")
+
+    def __len__(self) -> int:
+        return len(self.images)
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, int]:
+        img = self.images[idx]  # PIL Image 224×224, déjà resizée
+        img = self.transform(img)
+        return img, self.targets[idx]
+
+
+# Cache global pour éviter de recharger entre les runs
+_data_cache: dict[str, CachedCIFAR100] = {}
+
+
 def build_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
-    """Construit les dataloaders CIFAR-100 avec augmentation standard."""
+    """Construit les dataloaders CIFAR-100 avec cache PIL + augmentation complète."""
+    global _data_cache
+
+    # Augmentations sur PIL cachées (sans Resize — déjà fait dans le cache)
     train_transform = transforms.Compose([
-        transforms.Resize(config["img_size"]),
         transforms.RandomCrop(config["img_size"], padding=16),
         transforms.RandomHorizontalFlip(),
         transforms.TrivialAugmentWide(),
@@ -82,7 +133,6 @@ def build_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
         transforms.RandomErasing(p=0.25),
     ])
     test_transform = transforms.Compose([
-        transforms.Resize(config["img_size"]),
         transforms.ToTensor(),
         transforms.Normalize(
             mean=[0.5071, 0.4867, 0.4408],
@@ -90,16 +140,20 @@ def build_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
         ),
     ])
 
-    train_ds = datasets.CIFAR100(
-        root="./data", train=True, download=True, transform=train_transform,
-    )
-    test_ds = datasets.CIFAR100(
-        root="./data", train=False, download=True, transform=test_transform,
-    )
+    if "train" not in _data_cache:
+        _data_cache["train"] = CachedCIFAR100(
+            root="./data", train=True, img_size=config["img_size"],
+            transform=train_transform, download=True,
+        )
+    if "test" not in _data_cache:
+        _data_cache["test"] = CachedCIFAR100(
+            root="./data", train=False, img_size=config["img_size"],
+            transform=test_transform, download=True,
+        )
 
     pw = config["num_workers"] > 0
     train_loader = DataLoader(
-        train_ds,
+        _data_cache["train"],
         batch_size=config["batch_size"],
         shuffle=True,
         num_workers=config["num_workers"],
@@ -107,7 +161,7 @@ def build_dataloaders(config: dict) -> tuple[DataLoader, DataLoader]:
         persistent_workers=pw,
     )
     test_loader = DataLoader(
-        test_ds,
+        _data_cache["test"],
         batch_size=config["batch_size"] * 2,
         shuffle=False,
         num_workers=config["num_workers"],
